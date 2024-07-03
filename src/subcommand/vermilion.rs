@@ -414,7 +414,8 @@ struct CollectionList {
     twitter: Option<String>,
     #[serde(rename(deserialize = "website_link"))]
     website: Option<String>,
-    supply: Option<serde_json::Value>,
+    #[serde(skip_deserializing)]
+    supply: Option<i64>,
     //Deprecated:
     image_uri: Option<String>,
     min_inscription_number: Option<i64>,
