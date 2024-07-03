@@ -5020,7 +5020,7 @@ impl Vermilion {
   async fn get_inscriptions_in_collection(pool: deadpool, collection_symbol: String, params: ParsedInscriptionQueryParams) -> anyhow::Result<Vec<MetadataWithCollectionMetadata>> {
     let conn = pool.get().await?;
     //1. build query
-    let mut query = "with m as MATERIALIZED (SELECT o.*, c.collection_symbol, c.off_chain_metadata from ordinals o left join collections c on o.number=c.number where c.collection_symbol=$1".to_string();
+    let mut query = "with m as MATERIALIZED (SELECT o.*, c.collection_symbol, c.off_chain_metadata from ordinals o left join collections c on o.id=c.id where c.collection_symbol=$1".to_string();
     if params.content_types.len() > 0 {
       query.push_str(" AND (");
       for (i, content_type) in params.content_types.iter().enumerate() {
@@ -5158,7 +5158,7 @@ impl Vermilion {
   async fn get_inscription_collection_data_number(pool: deadpool, number: i64) -> anyhow::Result<Vec<InscriptionCollectionData>> {
     let conn = pool.get().await?;
     let result = conn.query(
-      "select c.id, c.number, c.off_chain_metadata, l.* from collections c left join collection_list l on c.collection_symbol=l.collection_symbol where c.number=$1", 
+      "select c.id, c.number, c.off_chain_metadata, l.* from collections c left join collection_list l on c.collection_symbol=l.collection_symbol where c.number=(select id from ordinals where number=$1);",
       &[&number]
     ).await?;
     let mut collection_data = Vec::new();
