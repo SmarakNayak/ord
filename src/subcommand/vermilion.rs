@@ -400,41 +400,35 @@ where
   }
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct CollectionList {
-  #[serde(rename(deserialize = "symbol"))]
-  collection_symbol: String,
-  name: Option<String>,
-  #[serde(rename(deserialize = "imageURI"))]
-  image_uri: Option<String>,
-  #[serde(rename(deserialize = "inscriptionIcon"))]
-  inscription_icon: Option<String>,
-  description: Option<String>,
-  #[serde(deserialize_with = "deserialize_option_number_from_string")]
-  supply: Option<i64>,
-  #[serde(rename(deserialize = "twitterLink"))]
-  twitter: Option<String>,
-  #[serde(rename(deserialize = "discordLink"))]
-  discord: Option<String>,
-  #[serde(rename(deserialize = "websiteLink"))]
-  website: Option<String>,
-  #[serde(deserialize_with = "deserialize_option_number_from_string")]
-  min_inscription_number: Option<i64>,
-  #[serde(deserialize_with = "deserialize_option_number_from_string")]
-  max_inscription_number: Option<i64>,
-  #[serde(rename(deserialize = "createdAt"), deserialize_with = "deserialize_date")]
-  date_created: i64
+#[derive(Serialize, Deserialize)]
+struct CollectionList {
+    description: Option<String>,
+    #[serde(rename(deserialize = "discord_link"))]
+    discord: Option<String>,
+    icon: Option<String>,
+    inscription_icon: Option<String>,
+    name: Option<String>,
+    #[serde(rename(deserialize = "slug"))]
+    collection_symbol: String,
+    #[serde(rename(deserialize = "twitter_link"))]
+    twitter: Option<String>,
+    #[serde(rename(deserialize = "website_link"))]
+    website: Option<String>,
+    supply: Option<serde_json::Value>,
+    //Deprecated:
+    image_uri: Option<String>,
+    min_inscription_number: Option<i64>,
+    max_inscription_number: Option<i64>,
+    date_created: Option<i64>
 }
 
 #[derive(Deserialize)]
 pub struct Collection {
   id: String,
-  #[serde(rename(deserialize = "inscriptionNumber"))]
-  number: i64,
-  #[serde(rename(deserialize = "collectionSymbol"))]
-  collection_symbol: String,
+  number: Option<i64>,
+  collection_symbol: Option<String>,
   #[serde(rename(deserialize = "meta"))]
-  off_chain_metadata: serde_json::Value
+  off_chain_metadata: Option<serde_json::Value>
 }
 
 #[derive(Serialize)]
@@ -683,15 +677,10 @@ impl Vermilion {
         println!("Error initializing db tables: {:?}", init_result.unwrap_err());
         return;
       }
-      let collection_list_insert_result = Self::insert_collection_list(deadpool.clone()).await;
-      let collection_insert_result = Self::insert_collections(deadpool.clone()).await;
+      let collection_data_insert_result = Self::insert_offchain_collection_data(deadpool.clone()).await;
       let collection_summary_result = Self::update_collection_summary(deadpool.clone()).await;
-      if collection_list_insert_result.is_err() {
-        println!("Error inserting collection list: {:?}", collection_list_insert_result.unwrap_err());
-        return;
-      }
-      if collection_insert_result.is_err() {
-        println!("Error inserting collection: {:?}", collection_insert_result.unwrap_err());
+      if collection_data_insert_result.is_err() {
+        println!("Error inserting collection list: {:?}", collection_data_insert_result.unwrap_err());
         return;
       }
       if collection_summary_result.is_err() {
@@ -3867,14 +3856,62 @@ impl Vermilion {
   }
 
   //DB functions
-  async fn insert_collection_list(pool: deadpool) -> anyhow::Result<()> {
+  fn read_offchain_metadata(root_dir: &str) -> Result<(Vec<CollectionList>, Vec<Collection>)> {
+    let mut meta_data_vec: Vec<CollectionList> = Vec::new();
+    let mut collection_vec: Vec<Collection> = Vec::new();
+    
+    for entry in fs::read_dir(root_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        //println!("Collection: {:?}", path);
+        if path.is_dir() {
+            let meta_file_path = path.join("meta.json");
+            if meta_file_path.exists() {
+              let content = fs::read_to_string(meta_file_path)?;
+
+              let meta_data: CollectionList = match serde_json::from_str(&content) {
+                  Ok(data) => data,
+                  Err(e) => {
+                      println!("Skipped: {:?} - {:?}", path , e);
+                      continue;
+                  }
+              };
+              //println!("Meta data: {:?}", meta_data);
+              let collection_symbol = meta_data.collection_symbol.clone();
+              meta_data_vec.push(meta_data);
+              let inscriptions_file_path = path.join("inscriptions.json");
+              if inscriptions_file_path.exists() {
+                let content = fs::read_to_string(inscriptions_file_path)?;
+                let mut collections: Vec<Collection> = match serde_json::from_str(&content) {
+                  Ok(data) => data,
+                  Err(e) => {
+                      println!("Skipped: {:?} - {:?}", path , e);
+                      continue;
+                  }
+                };
+                collections.iter_mut().for_each(|collection| {
+                    collection.collection_symbol = Some(collection_symbol.clone());
+                });
+                collection_vec.append(&mut collections);
+              }
+            }
+        }
+    }
+    
+    Ok((meta_data_vec, collection_vec))
+}
+
+  async fn insert_offchain_collection_data(pool: deadpool) -> anyhow::Result<()> {
+    let root_directory = "../ordinals-collections/collections";
+    let (collection_list, collections)  = Self::read_offchain_metadata(root_directory)?;
+    Self::insert_collection_list(pool.clone(), collection_list).await?;
+    Self::insert_collections(pool.clone(), collections).await?;
+    Ok(())
+  }
+
+  async fn insert_collection_list(pool: deadpool, collection_list: Vec<CollectionList>) -> anyhow::Result<()> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
-    let file = tokio::fs::File::open(std::path::Path::new("../ordinal-collections/collection_list.json")).await?;
-    let mut rdr = tokio::io::BufReader::new(file);
-    let mut content = String::new();
-    rdr.read_to_string(&mut content).await?;
-    let collection_list: Vec<CollectionList> = serde_json::from_str(&mut content)?;
     tx.simple_query("CREATE TEMP TABLE inserts_collection_list ON COMMIT DROP AS TABLE collection_list WITH NO DATA").await?;
     let copy_stm = r#"COPY inserts_collection_list (
       collection_symbol,
@@ -3930,14 +3967,9 @@ impl Vermilion {
     Ok(())
   }
 
-  async fn insert_collections(pool: deadpool) -> anyhow::Result<()> {
+  async fn insert_collections(pool: deadpool, collections: Vec<Collection>) -> anyhow::Result<()> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
-    let file = tokio::fs::File::open(std::path::Path::new("../ordinal-collections/collections.json")).await?;
-    let mut rdr = tokio::io::BufReader::new(file);
-    let mut content = String::new();
-    rdr.read_to_string(&mut content).await?;
-    let collections: Vec<Collection> = serde_json::from_str(&mut content)?;
     tx.simple_query("CREATE TEMP TABLE inserts_collections ON COMMIT DROP AS TABLE collections WITH NO DATA").await?;
     let copy_stm = r#"COPY inserts_collections (
       id,
